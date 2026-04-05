@@ -11,24 +11,61 @@ Windows equivalent of [watchkey](https://github.com/Etheirystech/watchkey) (macO
 
 ## Installation
 
-Build from source ([Rust](https://rustup.rs/) required):
+### Option 1: Download the binary
 
+1. Download `watchkey.exe` from the [latest release](https://github.com/Etheirystech/watchkey-win/releases/latest)
+2. Create a directory and move the binary there:
+
+**PowerShell:**
 ```powershell
-git clone https://github.com/Etheirystech/watchkey-win.git
-cd watchkey-win
-cargo build --release
-
-# Install to user-local directory (no admin required)
 New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\watchkey"
-Copy-Item target\release\watchkey.exe "$env:LOCALAPPDATA\watchkey\"
+Move-Item watchkey.exe "$env:LOCALAPPDATA\watchkey\"
 ```
 
-Then add `%LOCALAPPDATA%\watchkey` to your PATH:
+**Git Bash:**
+```bash
+mkdir -p "$LOCALAPPDATA/watchkey"
+mv watchkey.exe "$LOCALAPPDATA/watchkey/"
+```
 
+3. Add to your PATH:
+
+**PowerShell:**
 ```powershell
 $path = [Environment]::GetEnvironmentVariable("Path", "User")
 [Environment]::SetEnvironmentVariable("Path", "$path;$env:LOCALAPPDATA\watchkey", "User")
 ```
+
+**Git Bash** (add to `~/.bashrc`):
+```bash
+export PATH="$LOCALAPPDATA/watchkey:$PATH"
+```
+
+4. Restart your terminal.
+
+### Option 2: Build from source
+
+Requires [Rust](https://rustup.rs/).
+
+**PowerShell:**
+```powershell
+git clone https://github.com/Etheirystech/watchkey-win.git
+cd watchkey-win
+cargo build --release
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\watchkey"
+Copy-Item target\release\watchkey.exe "$env:LOCALAPPDATA\watchkey\"
+```
+
+**Git Bash:**
+```bash
+git clone https://github.com/Etheirystech/watchkey-win.git
+cd watchkey-win
+cargo build --release
+mkdir -p "$LOCALAPPDATA/watchkey"
+cp target/release/watchkey.exe "$LOCALAPPDATA/watchkey/"
+```
+
+Then add to your PATH (see step 3 above) and restart your terminal.
 
 ## Usage
 
@@ -40,7 +77,7 @@ watchkey list                       List all stored keys
 watchkey reset                      Remove all stored data
 ```
 
-### Examples
+### PowerShell examples
 
 ```powershell
 # Store a secret (will prompt for value and Windows Hello)
@@ -51,6 +88,25 @@ echo "my-secret" | watchkey set API_KEY
 
 # Retrieve a secret (triggers Windows Hello)
 $env:DOPPLER_TOKEN = $(watchkey get DOPPLER_TOKEN_DEV)
+
+# List all stored keys
+watchkey list
+
+# Delete a secret
+watchkey delete DOPPLER_TOKEN_DEV
+```
+
+### Git Bash examples
+
+```bash
+# Store a secret (will prompt for value and Windows Hello)
+watchkey set DOPPLER_TOKEN_DEV
+
+# Pipe a secret
+echo "my-secret" | watchkey set API_KEY
+
+# Retrieve a secret (triggers Windows Hello)
+export DOPPLER_TOKEN="$(watchkey get DOPPLER_TOKEN_DEV)"
 
 # List all stored keys
 watchkey list
