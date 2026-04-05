@@ -1,24 +1,83 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
+
 use sha2::{Digest, Sha256};
+use windows::core::s;
 use windows::Security::Credentials::{
     KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
 };
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Storage::Streams::IBuffer;
-use windows::Win32::System::Console::GetConsoleWindow;
-use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_MENU,
+};
+use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, SetForegroundWindow};
 
 use crate::error::WatchkeyError;
 
 const CREDENTIAL_NAME: &str = "watchkey";
 
-/// Bring the console window to the foreground so the Windows Hello
-/// dialog appears on top and gets focus.
-fn bring_to_foreground() {
-    unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_invalid() {
-            let _ = SetForegroundWindow(hwnd);
+/// Spawn a background thread that polls for the Windows Security dialog
+/// and brings it to the foreground using the ALT key trick.
+/// Returns a guard that stops polling when dropped.
+fn spawn_foreground_watcher() -> ForegroundGuard {
+    let done = Arc::new(AtomicBool::new(false));
+    let done_clone = done.clone();
+
+    thread::spawn(move || {
+        for _ in 0..50 {
+            // Poll for up to 5 seconds (50 × 100ms)
+            if done_clone.load(Ordering::Relaxed) {
+                return;
+            }
+
+            unsafe {
+                let hwnd = FindWindowA(s!("Credential Dialog Xaml Host"), None);
+                if !hwnd.is_invalid() {
+                    // Simulate ALT key press/release to unlock SetForegroundWindow
+                    let inputs = [
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                                ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                                    wVk: VK_MENU,
+                                    ..Default::default()
+                                },
+                            },
+                        },
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                                ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                                    wVk: VK_MENU,
+                                    dwFlags: KEYEVENTF_KEYUP,
+                                    ..Default::default()
+                                },
+                            },
+                        },
+                    ];
+                    let _ = SendInput(&inputs, size_of::<INPUT>() as i32);
+                    let _ = SetForegroundWindow(hwnd);
+                    return;
+                }
+            }
+
+            thread::sleep(Duration::from_millis(100));
         }
+    });
+
+    ForegroundGuard { done }
+}
+
+struct ForegroundGuard {
+    done: Arc<AtomicBool>,
+}
+
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        self.done.store(true, Ordering::Relaxed);
     }
 }
 
@@ -57,7 +116,7 @@ pub fn ensure_credential() -> Result<(), WatchkeyError> {
 
     if result.Status()? == KeyCredentialStatus::NotFound {
         // Create a new credential — triggers Windows Hello enrollment prompt.
-        bring_to_foreground();
+        let _guard = spawn_foreground_watcher();
         let create_result = KeyCredentialManager::RequestCreateAsync(
             &CREDENTIAL_NAME.into(),
             KeyCredentialCreationOption::FailIfExists,
@@ -99,7 +158,7 @@ pub fn authenticate() -> Result<Vec<u8>, WatchkeyError> {
         .Credential()
         .map_err(|e| WatchkeyError::AuthenticationFailed(e.message().to_string()))?;
 
-    bring_to_foreground();
+    let _guard = spawn_foreground_watcher();
     let sign_result = credential.RequestSignAsync(&challenge_buffer)?.get()?;
 
     match sign_result.Status()? {
