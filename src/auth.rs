@@ -10,10 +10,14 @@ use windows::Security::Credentials::{
 };
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Storage::Streams::IBuffer;
+use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_MENU,
 };
-use windows::Win32::UI::WindowsAndMessaging::{FindWindowA, SetForegroundWindow};
+use windows::Win32::UI::WindowsAndMessaging::{
+    FindWindowA, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOMOVE,
+    SWP_NOSIZE, SW_SHOW,
+};
 
 use crate::error::WatchkeyError;
 
@@ -27,39 +31,67 @@ fn spawn_foreground_watcher() -> ForegroundGuard {
     let done_clone = done.clone();
 
     thread::spawn(move || {
-        for _ in 0..50 {
-            // Poll for up to 5 seconds (50 × 100ms)
+        let mut found = false;
+        for _ in 0..100 {
+            // Poll for up to 10 seconds (100 × 100ms)
             if done_clone.load(Ordering::Relaxed) {
                 return;
             }
 
             unsafe {
                 if let Ok(hwnd) = FindWindowA(s!("Credential Dialog Xaml Host"), None) {
-                    // Simulate ALT key press/release to unlock SetForegroundWindow
-                    let inputs = [
-                        INPUT {
-                            r#type: INPUT_KEYBOARD,
-                            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                                ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
-                                    wVk: VK_MENU,
-                                    ..Default::default()
+                    if !found {
+                        // First time seeing the dialog — use all tricks
+                        // Simulate ALT key press/release to unlock SetForegroundWindow
+                        let inputs = [
+                            INPUT {
+                                r#type: INPUT_KEYBOARD,
+                                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                                    ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                                        wVk: VK_MENU,
+                                        ..Default::default()
+                                    },
                                 },
                             },
-                        },
-                        INPUT {
-                            r#type: INPUT_KEYBOARD,
-                            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-                                ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
-                                    wVk: VK_MENU,
-                                    dwFlags: KEYEVENTF_KEYUP,
-                                    ..Default::default()
+                            INPUT {
+                                r#type: INPUT_KEYBOARD,
+                                Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                                    ki: windows::Win32::UI::Input::KeyboardAndMouse::KEYBDINPUT {
+                                        wVk: VK_MENU,
+                                        dwFlags: KEYEVENTF_KEYUP,
+                                        ..Default::default()
+                                    },
                                 },
                             },
-                        },
-                    ];
-                    let _ = SendInput(&inputs, size_of::<INPUT>() as i32);
+                        ];
+                        let _ = SendInput(&inputs, size_of::<INPUT>() as i32);
+                        found = true;
+                    }
+
+                    // Force on top and to foreground — retry a few times
+                    let _ = SetWindowPos(
+                        hwnd,
+                        HWND_TOPMOST,
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE,
+                    );
+                    let _ = ShowWindow(hwnd, SW_SHOW);
                     let _ = SetForegroundWindow(hwnd);
-                    return;
+
+                    if found {
+                        // Keep trying for a bit then stop
+                        for _ in 0..5 {
+                            thread::sleep(Duration::from_millis(50));
+                            if done_clone.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            let _ = SetForegroundWindow(hwnd);
+                        }
+                        return;
+                    }
                 }
             }
 
