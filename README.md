@@ -11,15 +11,23 @@ Windows equivalent of [watchkey](https://github.com/Etheirystech/watchkey) (macO
 
 ## Installation
 
-Download the latest release from [GitHub Releases](https://github.com/Etheirystech/watchkey-win/releases) and add it to your PATH.
-
-Or build from source:
+Build from source ([Rust](https://rustup.rs/) required):
 
 ```powershell
 git clone https://github.com/Etheirystech/watchkey-win.git
 cd watchkey-win
 cargo build --release
-copy target\release\watchkey.exe C:\Program Files\watchkey\
+
+# Install to user-local directory (no admin required)
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\watchkey"
+Copy-Item target\release\watchkey.exe "$env:LOCALAPPDATA\watchkey\"
+```
+
+Then add `%LOCALAPPDATA%\watchkey` to your PATH:
+
+```powershell
+$path = [Environment]::GetEnvironmentVariable("Path", "User")
+[Environment]::SetEnvironmentVariable("Path", "$path;$env:LOCALAPPDATA\watchkey", "User")
 ```
 
 ## Usage
