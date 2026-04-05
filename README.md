@@ -45,7 +45,7 @@ export PATH="$LOCALAPPDATA/watchkey:$PATH"
 
 ### Option 2: Build from source
 
-Requires [Rust](https://rustup.rs/).
+Requires [Rust](https://rustup.rs/) (`winget install Rustlang.Rustup`).
 
 **PowerShell:**
 ```powershell
