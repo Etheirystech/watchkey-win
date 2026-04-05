@@ -4,10 +4,23 @@ use windows::Security::Credentials::{
 };
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Storage::Streams::IBuffer;
+use windows::Win32::System::Console::GetConsoleWindow;
+use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
 
 use crate::error::WatchkeyError;
 
 const CREDENTIAL_NAME: &str = "watchkey";
+
+/// Bring the console window to the foreground so the Windows Hello
+/// dialog appears on top and gets focus.
+fn bring_to_foreground() {
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_invalid() {
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+}
 
 /// Fixed challenge used for all authentication requests.
 /// The signature of this challenge is used to derive the wrapping key.
@@ -44,6 +57,7 @@ pub fn ensure_credential() -> Result<(), WatchkeyError> {
 
     if result.Status()? == KeyCredentialStatus::NotFound {
         // Create a new credential — triggers Windows Hello enrollment prompt.
+        bring_to_foreground();
         let create_result = KeyCredentialManager::RequestCreateAsync(
             &CREDENTIAL_NAME.into(),
             KeyCredentialCreationOption::FailIfExists,
@@ -85,6 +99,7 @@ pub fn authenticate() -> Result<Vec<u8>, WatchkeyError> {
         .Credential()
         .map_err(|e| WatchkeyError::AuthenticationFailed(e.message().to_string()))?;
 
+    bring_to_foreground();
     let sign_result = credential.RequestSignAsync(&challenge_buffer)?.get()?;
 
     match sign_result.Status()? {
