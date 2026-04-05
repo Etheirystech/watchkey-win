@@ -2,7 +2,7 @@ use crate::error::WatchkeyError;
 
 pub enum Command {
     Get { service: String },
-    Set { service: String, gui: bool },
+    Set { service: String },
     Delete { service: String },
     List,
     Reset,
@@ -40,7 +40,7 @@ pub fn parse() -> Result<Command, WatchkeyError> {
                 return Err(WatchkeyError::NotSupportedOnWindows("--gui".to_string()));
             }
 
-            Ok(Command::Set { service, gui: false })
+            Ok(Command::Set { service })
         }
         "delete" => {
             let service = args.get(1).cloned().unwrap_or_default();

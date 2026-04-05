@@ -36,7 +36,7 @@ fn run() -> Result<(), WatchkeyError> {
         }
         cli::Command::List => cmd_list(),
         cli::Command::Get { service } => cmd_get(&service),
-        cli::Command::Set { service, .. } => cmd_set(&service),
+        cli::Command::Set { service } => cmd_set(&service),
         cli::Command::Delete { service } => cmd_delete(&service),
         cli::Command::Reset => cmd_reset(),
     }
