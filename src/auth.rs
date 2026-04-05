@@ -10,7 +10,6 @@ use windows::Security::Credentials::{
 };
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Storage::Streams::IBuffer;
-use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_MENU,
 };
