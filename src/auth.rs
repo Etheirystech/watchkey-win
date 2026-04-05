@@ -22,9 +22,9 @@ fn bytes_to_buffer(data: &[u8]) -> windows::core::Result<IBuffer> {
 }
 
 fn buffer_to_bytes(buffer: &IBuffer) -> windows::core::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
+    let mut bytes = windows::core::Array::<u8>::new();
     CryptographicBuffer::CopyToByteArray(buffer, &mut bytes)?;
-    Ok(bytes)
+    Ok(bytes.as_ref().to_vec())
 }
 
 /// Check if Windows Hello is available and configured.
