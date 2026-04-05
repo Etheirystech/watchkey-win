@@ -34,8 +34,7 @@ fn spawn_foreground_watcher() -> ForegroundGuard {
             }
 
             unsafe {
-                let hwnd = FindWindowA(s!("Credential Dialog Xaml Host"), None);
-                if !hwnd.is_invalid() {
+                if let Ok(hwnd) = FindWindowA(s!("Credential Dialog Xaml Host"), None) {
                     // Simulate ALT key press/release to unlock SetForegroundWindow
                     let inputs = [
                         INPUT {
