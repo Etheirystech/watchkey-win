@@ -6,6 +6,10 @@ pub enum Command {
     Delete { service: String },
     List,
     Reset,
+    CompanionEnroll { base_url: String, code: String },
+    CompanionEnable,
+    CompanionDisable,
+    CompanionUnpair,
     Version,
     Help,
 }
@@ -27,12 +31,13 @@ pub fn parse() -> Result<Command, WatchkeyError> {
             let flags: Vec<&String> = args[1..].iter().filter(|a| a.starts_with("--")).collect();
             let positional: Vec<&String> =
                 args[1..].iter().filter(|a| !a.starts_with("--")).collect();
-            let service = positional.first().map(|s| s.to_string()).unwrap_or_default();
+            let service = positional
+                .first()
+                .map(|s| s.to_string())
+                .unwrap_or_default();
 
             if flags.iter().any(|f| f.as_str() == "--import") {
-                return Err(WatchkeyError::NotSupportedOnWindows(
-                    "--import".to_string(),
-                ));
+                return Err(WatchkeyError::NotSupportedOnWindows("--import".to_string()));
             }
 
             let gui = flags.iter().any(|f| f.as_str() == "--gui");
@@ -48,6 +53,19 @@ pub fn parse() -> Result<Command, WatchkeyError> {
         }
         "list" => Ok(Command::List),
         "reset" => Ok(Command::Reset),
+        "companion" => match args.get(1).map(String::as_str) {
+            Some("enroll") if args.len() == 4 => Ok(Command::CompanionEnroll {
+                base_url: args[2].clone(),
+                code: args[3].clone(),
+            }),
+            Some("enable") if args.len() == 2 => Ok(Command::CompanionEnable),
+            Some("disable") if args.len() == 2 => Ok(Command::CompanionDisable),
+            Some("unpair") if args.len() == 2 => Ok(Command::CompanionUnpair),
+            _ => Err(WatchkeyError::InvalidArgument(
+                "Usage: watchkey companion <enroll <https-url> <code>|enable|disable|unpair>"
+                    .into(),
+            )),
+        },
         "version" | "--version" | "-v" => Ok(Command::Version),
         "help" | "--help" | "-h" => Ok(Command::Help),
         other => {
@@ -69,6 +87,11 @@ Usage:
   watchkey delete <service>           Delete a stored secret
   watchkey list                       List all stored keys
   watchkey reset                      Remove all stored data and start fresh
+  watchkey companion enroll <url> <code>
+                                      Store a disabled Companion pairing
+  watchkey companion enable           Enable remote approval prompts
+  watchkey companion disable          Return to local-only authentication
+  watchkey companion unpair           Remove the local Companion pairing
 
 Examples:
   watchkey set DOPPLER_TOKEN_DEV

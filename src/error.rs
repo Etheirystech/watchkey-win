@@ -5,6 +5,7 @@ pub enum WatchkeyError {
     WindowsHelloNotSupported,
     AuthenticationFailed(String),
     AuthenticationCancelled,
+    RemoteApprovalDenied,
     CredentialCreateFailed(String),
     MasterKeyCorrupted,
     ServiceNotFound(String),
@@ -24,6 +25,7 @@ impl fmt::Display for WatchkeyError {
             ),
             Self::AuthenticationFailed(msg) => write!(f, "Authentication failed: {msg}"),
             Self::AuthenticationCancelled => write!(f, "Authentication cancelled."),
+            Self::RemoteApprovalDenied => write!(f, "Remote approval denied."),
             Self::CredentialCreateFailed(msg) => {
                 write!(f, "Failed to create Windows Hello credential: {msg}")
             }

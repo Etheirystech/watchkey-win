@@ -1,5 +1,6 @@
 mod auth;
 mod cli;
+mod companion;
 mod crypto;
 mod error;
 mod input;
@@ -7,6 +8,7 @@ mod storage;
 
 use error::WatchkeyError;
 use rand::RngCore;
+use zeroize::{Zeroize, Zeroizing};
 
 fn main() {
     let result = run();
@@ -39,6 +41,10 @@ fn run() -> Result<(), WatchkeyError> {
         cli::Command::Set { service } => cmd_set(&service),
         cli::Command::Delete { service } => cmd_delete(&service),
         cli::Command::Reset => cmd_reset(),
+        cli::Command::CompanionEnroll { base_url, code } => cmd_companion_enroll(&base_url, &code),
+        cli::Command::CompanionEnable => cmd_companion_enable(),
+        cli::Command::CompanionDisable => cmd_companion_disable(),
+        cli::Command::CompanionUnpair => cmd_companion_unpair(),
     }
 }
 
@@ -50,20 +56,22 @@ fn run() -> Result<(), WatchkeyError> {
 fn obtain_master_key(store: &mut storage::Store) -> Result<[u8; 32], WatchkeyError> {
     auth::check_support()?;
     auth::ensure_credential()?;
-    let signature = auth::authenticate()?;
-    let wrapping_key = crypto::derive_key(&signature);
+    let signature = Zeroizing::new(auth::authenticate()?);
+    let wrapping_key = Zeroizing::new(crypto::derive_key(&signature));
     let sig_hash = auth::signature_hash(&signature);
 
     match &store.master_key {
         Some(encrypted_master_key) => {
             // Try to unwrap with the current signature's derived key.
             match crypto::decrypt(&wrapping_key, encrypted_master_key) {
-                Ok(master_key_bytes) => {
+                Ok(mut master_key_bytes) => {
                     let mut key = [0u8; 32];
                     if master_key_bytes.len() != 32 {
+                        master_key_bytes.zeroize();
                         return Err(WatchkeyError::MasterKeyCorrupted);
                     }
                     key.copy_from_slice(&master_key_bytes);
+                    master_key_bytes.zeroize();
 
                     // Update signature hash if it changed (deterministic re-wrap).
                     if store.signature_hash.as_deref() != Some(&sig_hash) {
@@ -114,7 +122,7 @@ fn cmd_list() -> Result<(), WatchkeyError> {
 fn cmd_get(service: &str) -> Result<(), WatchkeyError> {
     let service = input::prompt_service(service)?;
     let mut store = storage::load()?;
-    let master_key = obtain_master_key(&mut store)?;
+    let master_key = Zeroizing::new(authorize_master_key(&mut store, "get", &service)?);
 
     let encrypted = store
         .secrets
@@ -122,8 +130,8 @@ fn cmd_get(service: &str) -> Result<(), WatchkeyError> {
         .ok_or_else(|| WatchkeyError::ServiceNotFound(service.clone()))?;
 
     let plaintext = crypto::decrypt(&master_key, encrypted)?;
-    let value = String::from_utf8(plaintext)
-        .map_err(|e| WatchkeyError::CryptoError(e.to_string()))?;
+    let value =
+        String::from_utf8(plaintext).map_err(|e| WatchkeyError::CryptoError(e.to_string()))?;
 
     // No trailing newline — matches macOS behavior.
     print!("{value}");
@@ -132,10 +140,9 @@ fn cmd_get(service: &str) -> Result<(), WatchkeyError> {
 
 fn cmd_set(service: &str) -> Result<(), WatchkeyError> {
     let service = input::prompt_service(service)?;
-    let value = input::read_secret()?;
-
     let mut store = storage::load()?;
-    let master_key = obtain_master_key(&mut store)?;
+    let master_key = Zeroizing::new(authorize_master_key(&mut store, "set", &service)?);
+    let value = Zeroizing::new(input::read_secret()?);
 
     let encrypted = crypto::encrypt(&master_key, value.as_bytes())?;
     store.secrets.insert(service.clone(), encrypted);
@@ -148,7 +155,7 @@ fn cmd_set(service: &str) -> Result<(), WatchkeyError> {
 fn cmd_delete(service: &str) -> Result<(), WatchkeyError> {
     let service = input::prompt_service(service)?;
     let mut store = storage::load()?;
-    let _master_key = obtain_master_key(&mut store)?;
+    let _master_key = Zeroizing::new(authorize_master_key(&mut store, "delete", &service)?);
 
     if store.secrets.remove(&service).is_none() {
         return Err(WatchkeyError::ServiceNotFound(service));
@@ -160,7 +167,49 @@ fn cmd_delete(service: &str) -> Result<(), WatchkeyError> {
 }
 
 fn cmd_reset() -> Result<(), WatchkeyError> {
+    companion::reset()?;
     storage::reset()?;
     eprintln!("All watchkey data has been removed.");
+    Ok(())
+}
+
+fn authorize_master_key(
+    store: &mut storage::Store,
+    operation: &str,
+    service: &str,
+) -> Result<[u8; 32], WatchkeyError> {
+    match companion::request_master_key(operation, service, None)? {
+        Some(key) => Ok(key),
+        None => obtain_master_key(store),
+    }
+}
+
+fn cmd_companion_enroll(base_url: &str, code: &str) -> Result<(), WatchkeyError> {
+    companion::enroll(base_url, code)?;
+    eprintln!(
+        "Paired this PC with {base_url}. Run `watchkey companion enable` to enable remote prompts."
+    );
+    Ok(())
+}
+
+fn cmd_companion_enable() -> Result<(), WatchkeyError> {
+    let mut store = storage::load()?;
+    let master_key = Zeroizing::new(obtain_master_key(&mut store)?);
+    companion::enable(&master_key)?;
+    eprintln!("Companion remote prompts enabled.");
+    Ok(())
+}
+
+fn cmd_companion_disable() -> Result<(), WatchkeyError> {
+    companion::disable()?;
+    eprintln!(
+        "Companion remote prompts disabled and its alternate master-key wrap was removed; Windows Hello will be used."
+    );
+    Ok(())
+}
+
+fn cmd_companion_unpair() -> Result<(), WatchkeyError> {
+    companion::unpair()?;
+    eprintln!("Removed the local Companion pairing.");
     Ok(())
 }

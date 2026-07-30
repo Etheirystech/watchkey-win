@@ -1,5 +1,5 @@
 use aes_gcm::aead::{Aead, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
+use aes_gcm::{AeadCore, Aes256Gcm, KeyInit, Nonce};
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use hkdf::Hkdf;
@@ -18,7 +18,8 @@ pub fn derive_key(signature: &[u8]) -> [u8; 32] {
 
 /// Encrypt plaintext with AES-256-GCM. Returns base64(nonce || ciphertext).
 pub fn encrypt(key: &[u8; 32], plaintext: &[u8]) -> Result<String, WatchkeyError> {
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|error| WatchkeyError::CryptoError(error.to_string()))?;
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
@@ -42,11 +43,15 @@ pub fn decrypt(key: &[u8; 32], encoded: &str) -> Result<Vec<u8>, WatchkeyError> 
     }
 
     let (nonce_bytes, ciphertext) = combined.split_at(12);
-    let nonce = Nonce::from_slice(nonce_bytes);
-    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let nonce_bytes: [u8; 12] = nonce_bytes
+        .try_into()
+        .map_err(|_| WatchkeyError::CryptoError("invalid nonce".to_string()))?;
+    let nonce = Nonce::from(nonce_bytes);
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|error| WatchkeyError::CryptoError(error.to_string()))?;
 
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| WatchkeyError::MasterKeyCorrupted)
 }
 

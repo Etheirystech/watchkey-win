@@ -1,6 +1,6 @@
 [package]
 name = "watchkey"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 description = "Access secrets with Windows Hello biometric authentication"
 license = "MIT"
@@ -9,8 +9,12 @@ license = "MIT"
 windows = { version = "0.58", features = [
     "Security_Credentials",
     "Security_Cryptography",
+    "Security_Cryptography_DataProtection",
     "Storage_Streams",
     "Foundation",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authentication_Identity",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -23,3 +27,6 @@ sha2 = "0.10"
 rand = "0.8"
 rpassword = "7"
 dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+p256 = { version = "0.13", features = ["ecdh"] }
+zeroize = { version = "1.8", features = ["derive"] }
