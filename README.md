@@ -158,12 +158,14 @@ alternate master-key wrap. Use `watchkey companion unpair` to remove the local
 pairing, and revoke the machine in the Companion web UI if its token may have
 been exposed. `watchkey reset` also removes the pairing and any alternate wrap.
 
-When Companion is enabled but unreachable, watchkey falls back to Windows
-Hello. A remote denial or an invalid submitted Windows account password is
-terminal and never falls back. The password field expects the account password,
-not a Windows Hello PIN. It is encrypted in the browser directly to an
-ephemeral key created by this watchkey process, verified locally with
-`LogonUserW`, and is not sent to the relay in plaintext.
+When Companion is enabled, Windows Hello and the Companion request start
+together. Approving either path is sufficient and closes the other prompt.
+Cancelling Windows Hello denies and closes the pending Companion request before
+the command exits. A remote denial or an invalid submitted Windows account
+password is terminal. The password field expects the account password, not a
+Windows Hello PIN. It is encrypted in the browser directly to an ephemeral key
+created by this watchkey process, verified locally with `LogonUserW`, and is not
+sent to the relay in plaintext.
 
 Companion always shows the actual watchkey invocation. When
 `WATCHKEY_FULL_COMMAND` is set, it also shows that value explicitly labeled as

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::error::WatchkeyError;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Store {
     pub version: u32,
     /// Base64-encoded encrypted master key (nonce + ciphertext).

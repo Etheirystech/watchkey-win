@@ -8,6 +8,10 @@ mod storage;
 
 use error::WatchkeyError;
 use rand::RngCore;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::thread;
 use zeroize::{Zeroize, Zeroizing};
 
 fn main() {
@@ -54,9 +58,17 @@ fn run() -> Result<(), WatchkeyError> {
 /// On first use, generates a new master key and wraps it with the Windows Hello signature.
 /// On subsequent uses, unwraps the stored master key.
 fn obtain_master_key(store: &mut storage::Store) -> Result<[u8; 32], WatchkeyError> {
+    obtain_master_key_with_cancellation(store, &auth::AuthenticationCancellation::default())
+}
+
+fn obtain_master_key_with_cancellation(
+    store: &mut storage::Store,
+    cancellation: &auth::AuthenticationCancellation,
+) -> Result<[u8; 32], WatchkeyError> {
+    let _runtime = auth::WindowsRuntimeGuard::initialize()?;
     auth::check_support()?;
     auth::ensure_credential()?;
-    let signature = Zeroizing::new(auth::authenticate()?);
+    let signature = Zeroizing::new(auth::authenticate_with_cancellation(cancellation)?);
     let wrapping_key = Zeroizing::new(crypto::derive_key(&signature));
     let sig_hash = auth::signature_hash(&signature);
 
@@ -178,9 +190,143 @@ fn authorize_master_key(
     operation: &str,
     service: &str,
 ) -> Result<[u8; 32], WatchkeyError> {
-    match companion::request_master_key(operation, service, None)? {
-        Some(key) => Ok(key),
-        None => obtain_master_key(store),
+    enum AuthorizationEvent {
+        Native(Result<(Zeroizing<[u8; 32]>, storage::Store), WatchkeyError>),
+        Remote(Result<Option<Zeroizing<[u8; 32]>>, WatchkeyError>),
+    }
+
+    fn wait_for_remote_cleanup(receiver: &Receiver<AuthorizationEvent>) {
+        while let Ok(event) = receiver.recv() {
+            if matches!(event, AuthorizationEvent::Remote(_)) {
+                return;
+            }
+        }
+    }
+
+    let local_decision = companion::LocalDecision::default();
+    let hello_cancellation = auth::AuthenticationCancellation::default();
+    let winner = Arc::new(AtomicU8::new(0));
+    let (sender, receiver) = mpsc::channel();
+
+    let native_sender = sender.clone();
+    let native_cancellation = hello_cancellation.clone();
+    let native_decision = local_decision.clone();
+    let native_winner = winner.clone();
+    let mut native_store = store.clone();
+    thread::spawn(move || {
+        let result = obtain_master_key_with_cancellation(&mut native_store, &native_cancellation)
+            .map(|key| (Zeroizing::new(key), native_store));
+        let event = match result {
+            Ok(result)
+                if native_winner
+                    .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok() =>
+            {
+                native_decision.resolve(true);
+                Some(AuthorizationEvent::Native(Ok(result)))
+            }
+            Err(error)
+                if matches!(&error, WatchkeyError::AuthenticationCancelled)
+                    && native_winner
+                        .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok() =>
+            {
+                native_decision.resolve(false);
+                Some(AuthorizationEvent::Native(Err(error)))
+            }
+            Err(error) if !matches!(&error, WatchkeyError::AuthenticationCancelled) => {
+                Some(AuthorizationEvent::Native(Err(error)))
+            }
+            _ => None,
+        };
+        if let Some(event) = event {
+            let _ = native_sender.send(event);
+        }
+    });
+
+    let remote_sender = sender.clone();
+    let remote_decision = local_decision.clone();
+    let remote_cancellation = hello_cancellation.clone();
+    let remote_winner = winner.clone();
+    let operation = operation.to_owned();
+    let service = service.to_owned();
+    thread::spawn(move || {
+        let _runtime = match auth::WindowsRuntimeGuard::initialize() {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                eprintln!("watchkey companion unavailable: {error}");
+                let _ = remote_sender.send(AuthorizationEvent::Remote(Ok(None)));
+                return;
+            }
+        };
+        let result = companion::request_master_key(&operation, &service, None, &remote_decision)
+            .map(|key| key.map(Zeroizing::new));
+        let event = match result {
+            Ok(Some(key))
+                if remote_winner
+                    .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok() =>
+            {
+                remote_cancellation.cancel();
+                AuthorizationEvent::Remote(Ok(Some(key)))
+            }
+            Err(error)
+                if remote_winner
+                    .compare_exchange(0, 4, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok() =>
+            {
+                remote_cancellation.cancel();
+                AuthorizationEvent::Remote(Err(error))
+            }
+            _ => AuthorizationEvent::Remote(Ok(None)),
+        };
+        let _ = remote_sender.send(event);
+    });
+    drop(sender);
+
+    let mut native_failure = None;
+    let mut remote_finished = false;
+    loop {
+        let event = receiver.recv().map_err(|_| {
+            WatchkeyError::AuthenticationFailed(
+                "Authorization workers stopped unexpectedly.".into(),
+            )
+        })?;
+        match event {
+            AuthorizationEvent::Native(Ok((key, updated_store))) => {
+                if !remote_finished {
+                    wait_for_remote_cleanup(&receiver);
+                }
+                *store = updated_store;
+                return Ok(*key);
+            }
+            AuthorizationEvent::Native(Err(error))
+                if matches!(&error, WatchkeyError::AuthenticationCancelled) =>
+            {
+                if !remote_finished {
+                    wait_for_remote_cleanup(&receiver);
+                }
+                return Err(error);
+            }
+            AuthorizationEvent::Native(Err(error)) => {
+                if remote_finished {
+                    return Err(error);
+                }
+                native_failure = Some(error);
+            }
+            AuthorizationEvent::Remote(Ok(Some(key))) => {
+                return Ok(*key);
+            }
+            AuthorizationEvent::Remote(Err(error)) => {
+                return Err(error);
+            }
+            AuthorizationEvent::Remote(Ok(None)) => {
+                remote_finished = true;
+                if let Some(error) = native_failure.take() {
+                    return Err(error);
+                }
+            }
+        }
     }
 }
 

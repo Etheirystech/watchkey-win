@@ -8,6 +8,8 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -95,6 +97,12 @@ struct PromptResult {
     iv: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct LocalDecisionResponse {
+    status: String,
+    mode: String,
+}
+
 #[derive(Deserialize, Zeroize)]
 struct PasswordEnvelope {
     password: String,
@@ -104,6 +112,29 @@ enum RemoteError {
     Denied,
     InvalidPassword,
     Unavailable(String),
+}
+
+/// A one-shot native decision shared with the Companion request worker.
+#[derive(Clone, Default)]
+pub struct LocalDecision {
+    state: Arc<AtomicU8>,
+}
+
+impl LocalDecision {
+    pub fn resolve(&self, approved: bool) {
+        let value = if approved { 1 } else { 2 };
+        let _ = self
+            .state
+            .compare_exchange(0, value, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn get(&self) -> Option<bool> {
+        match self.state.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
 }
 
 /// Pair this machine while retaining the original Windows Hello-only key wrap.
@@ -187,7 +218,12 @@ pub fn request_master_key(
     operation: &str,
     service: &str,
     explicit_command: Option<&str>,
+    local_decision: &LocalDecision,
 ) -> Result<Option<[u8; 32]>, WatchkeyError> {
+    let _runtime = crate::auth::WindowsRuntimeGuard::initialize()?;
+    if local_decision.get().is_some() {
+        return Ok(None);
+    }
     let path = match config_path() {
         Ok(path) => path,
         Err(error) => {
@@ -207,7 +243,13 @@ pub fn request_master_key(
         }
     };
 
-    match request_master_key_inner(&config, operation, service, explicit_command) {
+    match request_master_key_inner(
+        &config,
+        operation,
+        service,
+        explicit_command,
+        local_decision,
+    ) {
         Ok(result) => Ok(result),
         Err(RemoteError::Denied) => Err(WatchkeyError::RemoteApprovalDenied),
         Err(RemoteError::InvalidPassword) => Err(WatchkeyError::AuthenticationFailed(
@@ -225,6 +267,7 @@ fn request_master_key_inner(
     operation: &str,
     service: &str,
     explicit_command: Option<&str>,
+    local_decision: &LocalDecision,
 ) -> Result<Option<[u8; 32]>, RemoteError> {
     validate_config(config).map_err(remote_error)?;
     let base_url = validate_base_url(&config.base_url).map_err(remote_error)?;
@@ -270,12 +313,20 @@ fn request_master_key_inner(
     if !valid_identifier(&created.request_id, "req_") {
         return Err(remote_error("the server returned an invalid request ID"));
     }
+    if let Some(approved) = local_decision.get() {
+        record_local_decision(&client, &base_url, config, &created.request_id, approved)?;
+        return Ok(None);
+    }
 
     let now = unix_millis();
     let server_wait = Duration::from_millis(created.expires_at.saturating_sub(now));
     let deadline = Instant::now() + server_wait.min(MAXIMUM_PROMPT_DURATION);
 
     while Instant::now() < deadline {
+        if let Some(approved) = local_decision.get() {
+            record_local_decision(&client, &base_url, config, &created.request_id, approved)?;
+            return Ok(None);
+        }
         let result: PromptResult = send_json_remote(
             client
                 .get(
@@ -292,6 +343,10 @@ fn request_master_key_inner(
                 .error_for_status()
                 .map_err(remote_error)?,
         )?;
+        if let Some(approved) = local_decision.get() {
+            record_local_decision(&client, &base_url, config, &created.request_id, approved)?;
+            return Ok(None);
+        }
 
         match (result.status.as_str(), result.mode.as_deref()) {
             ("approved", Some("passwordless")) => {
@@ -326,6 +381,36 @@ fn request_master_key_inner(
         }
     }
     Err(RemoteError::Denied)
+}
+
+fn record_local_decision(
+    client: &Client,
+    base_url: &Url,
+    config: &CompanionConfig,
+    request_id: &str,
+    approved: bool,
+) -> Result<(), RemoteError> {
+    let response: LocalDecisionResponse = send_json_remote(
+        client
+            .patch(
+                endpoint(base_url, &format!("api/agent/requests/{request_id}"))
+                    .map_err(remote_error)?,
+            )
+            .bearer_auth(&config.agent_token)
+            .header("x-watchkey-machine-id", &config.machine_id)
+            .json(&serde_json::json!({ "approved": approved }))
+            .send()
+            .map_err(remote_error)?
+            .error_for_status()
+            .map_err(remote_error)?,
+    )?;
+    let expected_status = if approved { "approved" } else { "denied" };
+    if response.status != expected_status || response.mode != "local" {
+        return Err(remote_error(
+            "the server returned an invalid local-decision response",
+        ));
+    }
+    Ok(())
 }
 
 fn decrypt_password(
@@ -740,5 +825,16 @@ mod tests {
         assert!(command.starts_with("WatchKey invocation: watchkey get PRODUCTION_TOKEN"));
         assert!(command.contains("caller-reported outer command (unverified)"));
         assert!(command.contains("\"npm run harmless-preview\""));
+    }
+
+    #[test]
+    fn local_decision_is_one_shot() {
+        let decision = LocalDecision::default();
+        assert_eq!(decision.get(), None);
+
+        decision.resolve(false);
+        decision.resolve(true);
+
+        assert_eq!(decision.get(), Some(false));
     }
 }

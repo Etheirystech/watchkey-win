@@ -1,15 +1,18 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use windows::core::s;
+use windows::Foundation::IAsyncOperation;
 use windows::Security::Credentials::{
-    KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialStatus,
+    KeyCredentialCreationOption, KeyCredentialManager, KeyCredentialOperationResult,
+    KeyCredentialStatus,
 };
 use windows::Security::Cryptography::CryptographicBuffer;
 use windows::Storage::Streams::IBuffer;
+use windows::Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     SendInput, INPUT, INPUT_KEYBOARD, KEYEVENTF_KEYUP, VK_MENU,
 };
@@ -21,6 +24,68 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::error::WatchkeyError;
 
 const CREDENTIAL_NAME: &str = "watchkey";
+
+pub struct WindowsRuntimeGuard;
+
+impl WindowsRuntimeGuard {
+    pub fn initialize() -> Result<Self, WatchkeyError> {
+        unsafe { RoInitialize(RO_INIT_MULTITHREADED)? };
+        Ok(Self)
+    }
+}
+
+impl Drop for WindowsRuntimeGuard {
+    fn drop(&mut self) {
+        unsafe { RoUninitialize() };
+    }
+}
+
+#[derive(Default)]
+struct AuthenticationCancellationState {
+    cancelled: bool,
+    operation: Option<IAsyncOperation<KeyCredentialOperationResult>>,
+}
+
+/// Cancels an in-flight Windows Hello signing operation when Companion wins.
+#[derive(Clone, Default)]
+pub struct AuthenticationCancellation {
+    state: Arc<Mutex<AuthenticationCancellationState>>,
+}
+
+impl AuthenticationCancellation {
+    pub fn cancel(&self) {
+        let operation = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state.cancelled = true;
+            state.operation.take()
+        };
+        if let Some(operation) = operation {
+            let _ = operation.Cancel();
+        }
+    }
+
+    fn register(&self, operation: &IAsyncOperation<KeyCredentialOperationResult>) -> bool {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.cancelled {
+            let _ = operation.Cancel();
+            return false;
+        }
+        state.operation = Some(operation.clone());
+        true
+    }
+
+    fn clear(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.operation = None;
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .cancelled
+    }
+}
 
 /// Spawn a background thread that polls for the Windows Security dialog
 /// and brings it to the foreground using the ALT key trick.
@@ -68,15 +133,7 @@ fn spawn_foreground_watcher() -> ForegroundGuard {
                     }
 
                     // Force on top and to foreground — retry a few times
-                    let _ = SetWindowPos(
-                        hwnd,
-                        HWND_TOPMOST,
-                        0,
-                        0,
-                        0,
-                        0,
-                        SWP_NOMOVE | SWP_NOSIZE,
-                    );
+                    let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
                     let _ = ShowWindow(hwnd, SW_SHOW);
                     let _ = SetForegroundWindow(hwnd);
 
@@ -172,9 +229,11 @@ pub fn ensure_credential() -> Result<(), WatchkeyError> {
     Ok(())
 }
 
-/// Authenticate via Windows Hello and return the raw signature bytes.
-/// This triggers a biometric/PIN prompt every time.
-pub fn authenticate() -> Result<Vec<u8>, WatchkeyError> {
+/// Authenticate via Windows Hello while allowing a concurrent Companion
+/// decision to dismiss the Windows Security dialog.
+pub fn authenticate_with_cancellation(
+    cancellation: &AuthenticationCancellation,
+) -> Result<Vec<u8>, WatchkeyError> {
     let challenge = fixed_challenge();
     let challenge_buffer = bytes_to_buffer(&challenge)?;
 
@@ -189,7 +248,16 @@ pub fn authenticate() -> Result<Vec<u8>, WatchkeyError> {
         .map_err(|e| WatchkeyError::AuthenticationFailed(e.message().to_string()))?;
 
     let _guard = spawn_foreground_watcher();
-    let sign_result = credential.RequestSignAsync(&challenge_buffer)?.get()?;
+    let operation = credential.RequestSignAsync(&challenge_buffer)?;
+    if !cancellation.register(&operation) {
+        return Err(WatchkeyError::AuthenticationCancelled);
+    }
+    let sign_result = operation.get();
+    cancellation.clear();
+    if cancellation.is_cancelled() {
+        return Err(WatchkeyError::AuthenticationCancelled);
+    }
+    let sign_result = sign_result?;
 
     match sign_result.Status()? {
         KeyCredentialStatus::Success => {
